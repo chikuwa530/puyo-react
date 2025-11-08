@@ -1,422 +1,345 @@
 import React, { useEffect, useRef, useState } from "react";
 
-// --- Config ---
+// Puyo Puyo - シンプルだけどルールに沿った実装
+// - フィールド: 縦12×横6（画面外に上方向1マス許容）
+// - 組ぷよは縦向きで上に1マス分はみ出して生成される
+// - 色数は3〜5で設定可能
+// - 回転・左右移動・高速落下・ハードドロップ
+// - ネクスト表示
+// - 固定後は「ぶら下がりぷよ」を落下させてから消去判定（説明のルールに合わせる）
+// - 4個以上で消去、同時消去は1連鎖扱い、消去毎に連鎖としてカウント
+// - 窒息（ゲームオーバー）は固定化の結果、画面外（上方向）にぷよが残る/生成位置がふさがっていると判定
+
 const COLS = 6;
 const ROWS = 12;
-const CELL = 32; // px
-const CANVAS_W = COLS * CELL;
-const CANVAS_H = ROWS * CELL;
-const COLORS = [
-  "#e74c3c", // red
-  "#27ae60", // green
-  "#2980b9", // blue
-  "#f1c40f", // yellow
-  "#9b59b6", // purple
-];
+const MIN_COLORS = 3;
+const MAX_COLORS = 5;
 
-// Game speeds (ms per tick)
-const BASE_TICK = 700;
-const SOFT_DROP_TICK = 60;
+// change this to 3..5 to match rule
+const COLOR_COUNT = 5;
+const COLOR_PALETTE = ["red", "green", "blue", "yellow", "purple"];
+const COLORS = COLOR_PALETTE.slice(0, Math.min(Math.max(COLOR_COUNT, MIN_COLORS), MAX_COLORS));
 
-// --- Types ---
-/** grid[r][c] = null | colorIndex (0..COLORS.length-1) */
+function randColor() {
+  return COLORS[Math.floor(Math.random() * COLORS.length)];
+}
 
-function emptyGrid() {
+function makeEmptyGrid() {
   return Array.from({ length: ROWS }, () => Array(COLS).fill(null));
 }
 
-function randColor() {
-  return Math.floor(Math.random() * COLORS.length);
+function cloneGrid(g) {
+  return g.map(row => row.slice());
 }
 
-// child relative offsets per orientation (0: up, 1: right, 2: down, 3: left)
-const CHILD_OFFSETS = [
-  { x: 0, y: -1 },
-  { x: 1, y: 0 },
-  { x: 0, y: 1 },
-  { x: -1, y: 0 },
-];
-
-function inBounds(x, y) {
-  return x >= 0 && x < COLS && y >= 0 && y < ROWS;
-}
-
-function canPlace(grid, cells) {
-  for (const { x, y } of cells) {
-    if (!inBounds(x, y)) return false;
-    if (grid[y][x] !== null) return false;
-  }
-  return true;
-}
-
-function getPieceCells(piece) {
-  const { x, y, orientation, colors } = piece;
-  const child = CHILD_OFFSETS[orientation];
-  return [
-    { x, y, color: colors[0] },
-    { x: x + child.x, y: y + child.y, color: colors[1] },
-  ];
-}
-
-function cloneGrid(grid) {
-  return grid.map((row) => row.slice());
-}
-
-function paintPieceOnto(grid, piece) {
-  const g = cloneGrid(grid);
-  for (const cell of getPieceCells(piece)) {
-    if (inBounds(cell.x, cell.y)) g[cell.y][cell.x] = cell.color;
-  }
-  return g;
-}
-
-function spawnPiece() {
-  return {
-    x: Math.floor(COLS / 2),
-    y: 0,
-    orientation: 2, // child below by default
-    colors: [randColor(), randColor()],
-  };
-}
-
-function findClusters(grid) {
-  const visited = Array.from({ length: ROWS }, () => Array(COLS).fill(false));
-  const clusters = [];
-
-  const dirs = [
-    [1, 0],
-    [-1, 0],
-    [0, 1],
-    [0, -1],
-  ];
-
-  for (let y = 0; y < ROWS; y++) {
-    for (let x = 0; x < COLS; x++) {
-      const color = grid[y][x];
-      if (color === null || visited[y][x]) continue;
-      const stack = [[x, y]];
-      const cells = [];
-      visited[y][x] = true;
-      while (stack.length) {
-        const [cx, cy] = stack.pop();
-        cells.push([cx, cy]);
-        for (const [dx, dy] of dirs) {
-          const nx = cx + dx,
-            ny = cy + dy;
-          if (inBounds(nx, ny) && !visited[ny][nx] && grid[ny][nx] === color) {
-            visited[ny][nx] = true;
-            stack.push([nx, ny]);
-          }
-        }
-      }
-      if (cells.length >= 4) clusters.push({ color, cells });
-    }
-  }
-
-  return clusters;
-}
-
-function clearClusters(grid, clusters) {
-  const g = cloneGrid(grid);
-  for (const cl of clusters) {
-    for (const [x, y] of cl.cells) g[y][x] = null;
-  }
-  return g;
-}
-
-function applyGravity(grid) {
-  const g = cloneGrid(grid);
-  for (let x = 0; x < COLS; x++) {
-    let write = ROWS - 1;
-    for (let y = ROWS - 1; y >= 0; y--) {
-      if (g[y][x] !== null) {
-        const val = g[y][x];
-        g[y][x] = null;
-        g[write][x] = val;
-        write--;
-      }
-    }
-  }
-  return g;
-}
-
-function drawGrid(ctx, grid) {
-  ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
-  // background
-  ctx.fillStyle = "#0b132b";
-  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-
-  // cells
-  for (let y = 0; y < ROWS; y++) {
-    for (let x = 0; x < COLS; x++) {
-      const v = grid[y][x];
-      if (v !== null) {
-        const px = x * CELL;
-        const py = y * CELL;
-        const color = COLORS[v];
-        // bubble style
-        const r = CELL * 0.42;
-        const cx = px + CELL / 2;
-        const cy = py + CELL / 2;
-        const grad = ctx.createRadialGradient(
-          cx - r * 0.4,
-          cy - r * 0.4,
-          r * 0.2,
-          cx,
-          cy,
-          r,
-        );
-        grad.addColorStop(0, "#ffffff");
-        grad.addColorStop(0.15, color);
-        grad.addColorStop(1, "#111111");
-        ctx.fillStyle = grad;
-        ctx.beginPath();
-        ctx.arc(cx, cy, r, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      // grid line
-      ctx.strokeStyle = "rgba(255,255,255,0.06)";
-      ctx.strokeRect(x * CELL, y * CELL, CELL, CELL);
-    }
-  }
-}
-
-function drawPiece(ctx, piece) {
-  const cells = getPieceCells(piece);
-  for (const { x, y, color } of cells) {
-    if (!inBounds(x, y)) continue;
-    const px = x * CELL;
-    const py = y * CELL;
-    const r = CELL * 0.42;
-    const cx = px + CELL / 2;
-    const cy = py + CELL / 2;
-    const base = COLORS[color];
-    const grad = ctx.createRadialGradient(
-      cx - r * 0.4,
-      cy - r * 0.4,
-      r * 0.2,
-      cx,
-      cy,
-      r,
-    );
-    grad.addColorStop(0, "#ffffff");
-    grad.addColorStop(0.15, base);
-    grad.addColorStop(1, "#111111");
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.fill();
-  }
-}
-
-function within(grid, x, y) {
-  return inBounds(x, y) && grid[y][x] === null;
-}
-
-function tryMove(grid, piece, dx, dy) {
-  const np = { ...piece, x: piece.x + dx, y: piece.y + dy };
-  const cells = getPieceCells(np).map(({ x, y }) => ({ x, y }));
-  if (canPlace(grid, cells)) return np;
-  return piece;
-}
-
-function tryRotate(grid, piece, dir = 1) {
-  let next = { ...piece, orientation: (piece.orientation + dir + 4) % 4 };
-  let cells = getPieceCells(next).map(({ x, y }) => ({ x, y }));
-  if (canPlace(grid, cells)) return next;
-  // simple wall kicks: try move left/right
-  for (const dx of [-1, 1, -2, 2]) {
-    const kicked = { ...next, x: next.x + dx };
-    cells = getPieceCells(kicked).map(({ x, y }) => ({ x, y }));
-    if (canPlace(grid, cells)) return kicked;
-  }
-  return piece;
-}
-
-export default function App() {
-  const canvasRef = useRef(null);
-
-  const [grid, setGrid] = useState(emptyGrid);
-  const [piece, setPiece] = useState(spawnPiece);
-  const [running, setRunning] = useState(true);
-  const [score, setScore] = useState(0);
-  const [chains, setChains] = useState(0);
-  const [softDrop, setSoftDrop] = useState(false);
+export default function PuyoPuyo() {
+  const [grid, setGrid] = useState(makeEmptyGrid());
+  const [active, setActive] = useState(null); // {parts: [{r,c,color},{r,c,color}]}  r can be -1 (above screen)
+  const [nextPair, setNextPair] = useState([randColor(), randColor()]);
   const [gameOver, setGameOver] = useState(false);
+  const [score, setScore] = useState(0);
+  const [chainCount, setChainCount] = useState(0);
+  const gravityRef = useRef(800);
+  const tickRef = useRef(null);
+  const keysRef = useRef({});
 
-  // draw
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext("2d");
-    drawGrid(ctx, grid);
-    if (!gameOver) drawPiece(ctx, piece);
-  }, [grid, piece, gameOver]);
+  // spawn at r = -1 (top part) and r = 0 (bottom part), same column (vertical)
+  function spawnPair() {
+    const colors = nextPair;
+    const mid = Math.floor(COLS / 2) - 1;
+    const pair = {
+      parts: [
+        { r: 0, c: mid, color: colors[0] },
+        { r: -1, c: mid, color: colors[1] },
+      ],
+    };
+    setNextPair([randColor(), randColor()]);
+    // if spawn collides immediately with existing puyos (including above-screen), game over
+    if (!canPlace(pair, grid)) {
+      setGameOver(true);
+      setActive(null);
+    } else setActive(pair);
+  }
 
-  // keyboard
-  useEffect(() => {
-    function onKey(e) {
-      if (!running || gameOver) return;
-      if (e.key === "ArrowLeft") {
-        setPiece((p) => tryMove(grid, p, -1, 0));
-      } else if (e.key === "ArrowRight") {
-        setPiece((p) => tryMove(grid, p, 1, 0));
-      } else if (e.key === "ArrowDown") {
-        setSoftDrop(true);
-      } else if (e.key === "ArrowUp" || e.key === "x") {
-        setPiece((p) => tryRotate(grid, p, 1));
-      } else if (e.key === "z") {
-        setPiece((p) => tryRotate(grid, p, -1));
-      } else if (e.key === " ") {
-        // hard drop
-        setPiece((p) => {
-          let cur = p;
-          while (true) {
-            const moved = tryMove(grid, cur, 0, 1);
-            if (moved === cur) break;
-            cur = moved;
-          }
-          return cur;
-        });
-        // lock immediately next tick
-      } else if (e.key === "p") {
-        setRunning((r) => !r);
-      } else if (e.key === "r") {
-        reset();
+  // lock active into grid, return new grid and whether any part was above screen (overflow)
+  function lockActive(g, a) {
+    const ng = cloneGrid(g);
+    let overflow = false;
+    for (const p of a.parts) {
+      if (p.r < 0) { overflow = true; continue; }
+      if (p.r >= 0 && p.r < ROWS && p.c >= 0 && p.c < COLS) ng[p.r][p.c] = p.color;
+    }
+    return { ng, overflow };
+  }
+
+  // test placement: parts may have r < 0 (allowed), but c must be in bounds and r cannot be >= ROWS or collide when r>=0
+  function canPlace(a, g) {
+    for (const p of a.parts) {
+      if (p.c < 0 || p.c >= COLS) return false;
+      if (p.r >= ROWS) return false;
+      if (p.r >= 0 && g[p.r][p.c]) return false;
+    }
+    return true;
+  }
+
+  // move/rotate active
+  function moveActive(dr, dc, rotation = 0) {
+    if (!active) return;
+    const newA = { parts: active.parts.map(p => ({ ...p })) };
+    if (rotation !== 0) {
+      const base = newA.parts[0];
+      const other = newA.parts[1];
+      const relR = other.r - base.r;
+      const relC = other.c - base.c;
+      let nrel;
+      if (rotation === 1) nrel = { r: -relC, c: relR };
+      else nrel = { r: relC, c: -relR };
+      other.r = base.r + nrel.r;
+      other.c = base.c + nrel.c;
+    }
+    for (const p of newA.parts) { p.r += dr; p.c += dc; }
+    if (canPlace(newA, grid)) setActive(newA);
+    else {
+      // wall kicks for rotation
+      if (rotation !== 0) {
+        for (const kick of [-1, 1, -2, 2]) {
+          const kicked = { parts: newA.parts.map(p => ({ ...p })) };
+          for (const p of kicked.parts) p.c += kick;
+          if (canPlace(kicked, grid)) { setActive(kicked); return; }
+        }
       }
     }
-    function onKeyUp(e) {
-      if (e.key === "ArrowDown") setSoftDrop(false);
+  }
+
+  // single gravity tick for active
+  function stepDown() {
+    if (!active) return;
+    const candidate = { parts: active.parts.map(p => ({ ...p, r: p.r + 1 })) };
+    if (canPlace(candidate, grid)) { setActive(candidate); }
+    else {
+      // lock and then apply post-lock falling + resolve
+      const { ng, overflow } = lockActive(grid, active);
+      setGrid(ng);
+      setActive(null);
+      // if any locked part was above screen, that's a game over (窒息に近い判定)
+      if (overflow) { setTimeout(() => setGameOver(true), 10); return; }
+      // after locking, force any single hanging puyos to fall before checking clears (ルールに合わせる)
+      setTimeout(() => postLockGravityAndResolve(ng), 10);
     }
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("keyup", onKeyUp);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("keyup", onKeyUp);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [grid, running, gameOver]);
+  }
 
-  // game loop
-  useEffect(() => {
-    if (!running || gameOver) return;
-    let cancelled = false;
-    const tickMs = softDrop ? SOFT_DROP_TICK : BASE_TICK;
+  function hardDrop() {
+    if (!active) return;
+    let candidate = { parts: active.parts.map(p => ({ ...p })) };
+    while (true) {
+      const down = { parts: candidate.parts.map(p => ({ ...p, r: p.r + 1 })) };
+      if (canPlace(down, grid)) candidate = down;
+      else break;
+    }
+    const { ng, overflow } = lockActive(grid, candidate);
+    setGrid(ng);
+    setActive(null);
+    if (overflow) { setTimeout(() => setGameOver(true), 10); return; }
+    setTimeout(() => postLockGravityAndResolve(ng), 10);
+  }
 
-    const tick = () => {
-      if (cancelled) return;
-      setPiece((p) => {
-        const moved = tryMove(grid, p, 0, 1);
-        if (moved === p) {
-          // lock
-          let g = paintPieceOnto(grid, p);
-          // check clusters with cascading
-          let totalCleared = 0;
-          let chain = 0;
-          while (true) {
-            const clusters = findClusters(g);
-            if (clusters.length === 0) break;
-            chain += 1;
-            const cleared = clusters.reduce(
-              (acc, c) => acc + c.cells.length,
-              0,
-            );
-            totalCleared += cleared;
-            g = clearClusters(g, clusters);
-            g = applyGravity(g);
-          }
-          if (chain > 0) {
-            setChains(chain);
-            setScore((s) => s + totalCleared * 10 * chain);
-          } else {
-            setChains(0);
-          }
-          // spawn next
-          const next = spawnPiece();
-          const cells = getPieceCells(next).map(({ x, y }) => ({ x, y }));
-          if (!canPlace(g, cells)) {
-            setGrid(g);
-            setGameOver(true);
-            setRunning(false);
-            return p; // keep piece for draw suppression
-          }
-          setGrid(g);
-          return next;
+  // apply gravity so any puyo with empty below falls (single-piece fall) until stable, then resolve chains
+  function postLockGravityAndResolve(startGrid) {
+    let g = cloneGrid(startGrid);
+    // apply gravity until no change
+    while (true) {
+      let changed = false;
+      for (let c = 0; c < COLS; c++) {
+        let write = ROWS - 1;
+        for (let r = ROWS - 1; r >= 0; r--) {
+          if (g[r][c]) { g[write][c] = g[r][c]; if (write !== r) { g[r][c] = null; changed = true; } write--; }
         }
-        return moved;
-      });
-    };
+        while (write >= 0) { g[write][c] = null; write--; }
+      }
+      if (!changed) break;
+    }
+    // now resolve deletions and chain reactions
+    resolveChains(g);
+  }
 
-    const id = setInterval(tick, tickMs);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [grid, running, softDrop, gameOver]);
+  // resolve groups of 4+ repeatedly and count chains
+  function resolveChains(startGrid) {
+    let g = cloneGrid(startGrid);
+    let totalCleared = 0;
+    let chains = 0;
+    while (true) {
+      const visited = Array.from({ length: ROWS }, () => Array(COLS).fill(false));
+      const toClear = Array.from({ length: ROWS }, () => Array(COLS).fill(false));
+      let foundAny = false;
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          if (g[r][c] && !visited[r][c]) {
+            const color = g[r][c];
+            const q = [[r, c]];
+            visited[r][c] = true;
+            const group = [[r, c]];
+            while (q.length) {
+              const [cr, cc] = q.shift();
+              const neigh = [[cr-1,cc],[cr+1,cc],[cr,cc-1],[cr,cc+1]];
+              for (const [nr, nc] of neigh) {
+                if (nr>=0 && nr<ROWS && nc>=0 && nc<COLS && !visited[nr][nc] && g[nr][nc] === color) {
+                  visited[nr][nc] = true;
+                  q.push([nr,nc]);
+                  group.push([nr,nc]);
+                }
+              }
+            }
+            if (group.length >= 4) {
+              foundAny = true;
+              for (const [gr, gc] of group) toClear[gr][gc] = true;
+            }
+          }
+        }
+      }
+      if (!foundAny) break;
+      let clearedThis = 0;
+      for (let r=0;r<ROWS;r++) for (let c=0;c<COLS;c++) if (toClear[r][c]) { g[r][c] = null; clearedThis++; }
+      totalCleared += clearedThis;
+      chains += 1;
+      // after clear, apply gravity (pieces above fall)
+      for (let c=0;c<COLS;c++) {
+        let write = ROWS-1;
+        for (let r=ROWS-1;r>=0;r--) {
+          if (g[r][c]) { g[write][c] = g[r][c]; if (write!==r) g[r][c] = null; write--; }
+        }
+        while (write>=0) { g[write][c] = null; write--; }
+      }
+    }
 
-  function reset() {
-    setGrid(emptyGrid());
-    setPiece(spawnPiece());
+    if (totalCleared > 0) {
+      // simple scoring: base points times chain multiplier
+      const chainMultiplier = 1 + (chains - 1) * 0.5; // 1.0, 1.5, 2.0 ...
+      setScore(s => s + Math.floor(totalCleared * 10 * chainMultiplier));
+      setChainCount(ch => ch + chains);
+      setGrid(g);
+      // spawn next after a delay
+      setTimeout(() => {
+        // spawn blocked if top area (r=0 or r=-1 area) is occupied at spawn position
+        const spawnBlocked = g[0].some(cell => cell !== null);
+        if (spawnBlocked) { setGameOver(true); setActive(null); }
+        else spawnPair();
+      }, 350);
+    } else {
+      // no clears -> just spawn next
+      setGrid(g);
+      const spawnBlocked = g[0].some(cell => cell !== null);
+      if (spawnBlocked) { setGameOver(true); setActive(null); }
+      else spawnPair();
+    }
+  }
+
+  // input handling
+  useEffect(() => {
+    function onKeyDown(e) {
+      if (gameOver) return;
+      if (keysRef.current[e.code]) return;
+      keysRef.current[e.code] = true;
+      if (e.code === "ArrowLeft") moveActive(0, -1);
+      else if (e.code === "ArrowRight") moveActive(0, 1);
+      else if (e.code === "ArrowDown") stepDown();
+      else if (e.code === "ArrowUp") moveActive(0, 0, 1);
+      else if (e.code === "Space") hardDrop();
+    }
+    function onKeyUp(e) { delete keysRef.current[e.code]; }
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => { window.removeEventListener("keydown", onKeyDown); window.removeEventListener("keyup", onKeyUp); };
+  }, [active, grid, gameOver]);
+
+  // gravity loop
+  useEffect(() => {
+    if (gameOver) return;
+    if (!active) return;
+    if (tickRef.current) clearInterval(tickRef.current);
+    tickRef.current = setInterval(() => { stepDown(); }, gravityRef.current);
+    return () => clearInterval(tickRef.current);
+  }, [active, grid, gameOver]);
+
+  // start
+  useEffect(() => {
+    setGrid(makeEmptyGrid());
     setScore(0);
-    setChains(0);
+    setChainCount(0);
     setGameOver(false);
-    setRunning(true);
+    setNextPair([randColor(), randColor()]);
+    setTimeout(() => spawnPair(), 200);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // overlay active
+  const displayGrid = cloneGrid(grid);
+  if (active) {
+    for (const p of active.parts) {
+      if (p.r >= 0 && p.r < ROWS && p.c >= 0 && p.c < COLS) displayGrid[p.r][p.c] = p.color;
+    }
+  }
+
+  function resetGame() {
+    setGrid(makeEmptyGrid());
+    setActive(null);
+    setNextPair([randColor(), randColor()]);
+    setScore(0);
+    setChainCount(0);
+    setGameOver(false);
+    setTimeout(spawnPair, 200);
   }
 
   return (
-    <div className="min-h-screen w-full bg-slate-900 text-slate-100 flex items-center justify-center p-6">
-      <div className="grid grid-cols-[auto_1fr] gap-6 items-start">
-        <div className="bg-slate-800 rounded-2xl p-4 shadow-xl">
-          <canvas
-            ref={canvasRef}
-            width={CANVAS_W}
-            height={CANVAS_H}
-            className="rounded-xl border border-slate-700"
-          />
+    <div className="p-4 flex flex-col items-center gap-4">
+      <h1 className="text-2xl font-bold">ぷよぷよ - ルール準拠版</h1>
+      <div className="flex gap-6">
+        <div>
+          <div className="grid grid-cols-6 gap-1 p-1 bg-slate-800 rounded" style={{ width: 6 * 40 + 6 * 4 }}>
+            {displayGrid.map((row, r) => row.map((cell, c) => (
+              <div key={`${r}-${c}`} className={`w-10 h-10 rounded flex items-center justify-center border border-slate-700 ${cell ? "shadow-inner" : "bg-slate-900"}`}>
+                {cell && (
+                  <div className={`w-8 h-8 rounded-full ${cell === 'red' ? 'bg-red-500' : ''} ${cell === 'green' ? 'bg-green-500' : ''} ${cell === 'blue' ? 'bg-blue-500' : ''} ${cell === 'yellow' ? 'bg-yellow-400' : ''} ${cell === 'purple' ? 'bg-purple-500' : ''}`} />
+                )}
+              </div>
+            )) )}
+          </div>
+          <div className="mt-2 text-sm text-slate-300">Controls: ← → (move) ↑ (rotate) ↓ (soft drop) Space (hard drop)</div>
         </div>
-        <div className="space-y-4 max-w-sm">
-          <h1 className="text-2xl font-bold">ぷよぷよ（簡易版）</h1>
-          <div className="grid grid-cols-2 gap-3">
-            <InfoCard label="SCORE" value={score.toLocaleString()} />
-            <InfoCard label="CHAINS" value={chains} />
-            <InfoCard
-              label="STATE"
-              value={running ? (gameOver ? "GAME OVER" : "PLAY") : "PAUSE"}
-            />
+
+        <div className="w-48 flex flex-col gap-3">
+          <div className="p-3 bg-slate-900 rounded shadow">
+            <div className="text-sm text-slate-400">Next</div>
+            <div className="mt-2 flex gap-2">
+              {nextPair.map((col, i) => (
+                <div key={i} className="w-10 h-10 rounded-full flex items-center justify-center border border-slate-700">
+                  <div className={`w-8 h-8 rounded-full ${col === 'red' ? 'bg-red-500' : ''} ${col === 'green' ? 'bg-green-500' : ''} ${col === 'blue' ? 'bg-blue-500' : ''} ${col === 'yellow' ? 'bg-yellow-400' : ''} ${col === 'purple' ? 'bg-purple-500' : ''}`} />
+                </div>
+              ))}
+            </div>
           </div>
-          <div className="bg-slate-800 rounded-xl p-4 leading-relaxed text-sm border border-slate-700">
-            <p className="font-semibold mb-1">操作方法</p>
-            <ul className="list-disc pl-5 space-y-1">
-              <li>← → : 移動</li>
-              <li>↑ / X : 右回転</li>
-              <li>Z : 左回転</li>
-              <li>↓ : ソフトドロップ</li>
-              <li>Space : ハードドロップ</li>
-              <li>P : 一時停止 / 再開</li>
-              <li>R : リセット</li>
-            </ul>
+
+          <div className="p-3 bg-slate-900 rounded shadow">
+            <div className="text-sm text-slate-400">Score</div>
+            <div className="text-xl font-mono">{Math.floor(score)}</div>
           </div>
-          <div className="text-xs text-slate-400">
-            4個以上つながると消滅。連鎖が発生するとボーナス加点されます。
+
+          <div className="p-3 bg-slate-900 rounded shadow">
+            <div className="text-sm text-slate-400">Chains (累計)</div>
+            <div className="text-xl font-mono">{chainCount}</div>
           </div>
+
+          <div className="p-3 bg-slate-900 rounded shadow flex gap-2">
+            <button className="px-3 py-1 rounded bg-blue-600" onClick={() => { if (!active && !gameOver) spawnPair(); }}>Start / Resume</button>
+            <button className="px-3 py-1 rounded bg-red-600" onClick={resetGame}>Reset</button>
+          </div>
+
           {gameOver && (
-            <button
-              onClick={reset}
-              className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 transition shadow"
-            >
-              もう一度！
-            </button>
+            <div className="p-3 bg-red-900 text-white rounded">Game Over</div>
           )}
         </div>
       </div>
-    </div>
-  );
-}
 
-function InfoCard({ label, value }) {
-  return (
-    <div className="rounded-xl bg-slate-800 border border-slate-700 p-3">
-      <div className="text-[10px] tracking-widest text-slate-400">{label}</div>
-      <div className="text-xl font-bold">{value}</div>
+      <div className="mt-3 text-xs text-slate-400">ルールに合わせて「固定後の個別落下（ぶら下がり落下）」と消去判定の順序を実装しました。色数は3〜5で調整可能です。</div>
     </div>
   );
 }
