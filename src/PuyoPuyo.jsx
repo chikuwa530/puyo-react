@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+
 
 // Puyo Puyo - シンプルだけどルールに沿った実装
 // - フィールド: 縦12×横6（画面外に上方向1マス許容）
